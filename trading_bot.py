@@ -3,7 +3,7 @@ import json
 import logging
 import base64
 from datetime import datetime
-import google.generativeai as genai
+import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update
@@ -12,11 +12,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Environment variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi!")
@@ -24,13 +23,9 @@ if not SPREADSHEET_ID:
     raise RuntimeError("SPREADSHEET_ID topilmadi!")
 if not GOOGLE_CREDENTIALS:
     raise RuntimeError("GOOGLE_CREDENTIALS topilmadi!")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY topilmadi!")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError("ANTHROPIC_API_KEY topilmadi!")
 
-# Gemini sozlash
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Google Sheets ga ulanish
 def get_sheet():
     creds_dict = json.loads(GOOGLE_CREDENTIALS)
     scopes = [
@@ -42,27 +37,38 @@ def get_sheet():
     sheet = client.open_by_key(SPREADSHEET_ID).sheet1
     return sheet
 
-# Mavjud bitimlarni olish (takrorlanmaslik uchun)
 def get_existing_trades(sheet):
     rows = sheet.get_all_values()
     existing = set()
-    for row in rows[1:]:  # 1-qator sarlavha
+    for row in rows[1:]:
         if len(row) >= 3:
             key = f"{row[0]}_{row[1]}_{row[2]}"
             existing.add(key)
     return existing
 
-# Rasmdan bitimlarni ajratib olish (Gemini Vision orqali)
 async def extract_trades_from_image(image_bytes: bytes) -> list:
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    image_base64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     today = datetime.now().strftime("%d.%m.%Y")
 
-    image_part = {
-        "mime_type": "image/jpeg",
-        "data": base64.b64encode(image_bytes).decode("utf-8")
-    }
-
-    prompt = f"""Bu MetaTrader trading history screenshoti.
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1000,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": f"""Bu MetaTrader trading history screenshoti.
 Rasmdan barcha bitimlarni (trade) ajratib ol va JSON formatda qaytarib ber.
 
 Bugungi sana: {today}
@@ -70,7 +76,7 @@ Bugungi sana: {today}
 Har bir bitim uchun:
 - date: bitim sanasi (DD.MM.YYYY formatda, agar rasmda sana yo'q bo'lsa {today} ni ishlet)
 - instrument: savdo qilingan juftlik (masalan XAUUSD, EURUSD)
-- result: natija (TP yoki SL)
+- result: natija. Agar son musbat bo'lsa TP, manfiy bo'lsa SL
 - setup: bo'sh qoldir ("")
 - mistake: bo'sh qoldir ("")
 - lesson: bo'sh qoldir ("")
@@ -82,11 +88,13 @@ FAQAT JSON qaytarib ber, boshqa hech narsa yozma:
 ]
 
 Agar rasmda hech qanday bitim topilmasa, bo'sh massiv qaytarib ber: []"""
+                    }
+                ]
+            }
+        ]
+    )
 
-    response = model.generate_content([prompt, image_part])
-    text = response.text.strip()
-
-    # JSON ni tozalash
+    text = response.content[0].text.strip()
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
@@ -95,7 +103,6 @@ Agar rasmda hech qanday bitim topilmasa, bo'sh massiv qaytarib ber: []"""
     trades = json.loads(text)
     return trades
 
-# /start buyrug'i
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 Trading Journal Bot\n\n"
@@ -106,7 +113,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/report — so'nggi 5 ta bitim va statistika"
     )
 
-# /report buyrug'i
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sheet = get_sheet()
@@ -127,7 +133,6 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 emoji = "✅" if result == "TP" else "❌" if result == "SL" else "—"
                 text += f"{emoji} {date} | {instrument} | {result}\n"
 
-        # Statistika
         all_results = [r[2] for r in trades if len(r) >= 3 and r[2] in ["TP", "SL"]]
         if all_results:
             tp_count = all_results.count("TP")
@@ -138,11 +143,10 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"🎯 Winrate: {winrate}%"
 
         await update.message.reply_text(text)
-    except Exception as e:
+    except Exception:
         logger.exception("Report xatosi")
         await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko'ring.")
 
-# Rasm qabul qilish
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Rasm qabul qilindi, tahlil qilinmoqda...")
 
@@ -190,14 +194,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif added > 0 and skipped > 0:
             await update.message.reply_text(
                 f"✅ {added} ta yangi bitim qo'shildi.\n"
-                f"⏭️ {skipped} ta bitim allaqachon mavjud edi (o'tkazib yuborildi)."
+                f"⏭️ {skipped} ta bitim allaqachon mavjud edi."
             )
         else:
             await update.message.reply_text(
                 f"⏭️ Barcha {skipped} ta bitim allaqachon Sheets da mavjud edi."
             )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Rasm tahlil xatosi")
         await update.message.reply_text(
             "❌ Xatolik yuz berdi. Qaytadan urinib ko'ring."
