@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import base64
-from datetime import datetime
+from datetime import datetime, time
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
@@ -16,6 +16,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS = os.environ.get("GOOGLE_CREDENTIALS")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+CHAT_ID = os.environ.get("CHAT_ID")  # Kunlik hisobot uchun
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN topilmadi!")
@@ -45,6 +46,25 @@ def get_existing_trades(sheet):
             key = f"{row[0]}_{row[1]}_{row[2]}"
             existing.add(key)
     return existing
+
+def build_stats_text(trades, title="📊 Statistika"):
+    if not trades:
+        return f"{title}\n\nHali hech qanday bitim yo'q."
+    
+    all_results = [r[2] for r in trades if len(r) >= 3 and r[2] in ["TP", "SL"]]
+    if not all_results:
+        return f"{title}\n\nBitimlar topilmadi."
+    
+    tp_count = all_results.count("TP")
+    sl_count = all_results.count("SL")
+    winrate = round(tp_count / len(all_results) * 100)
+    
+    text = f"{title}\n\n"
+    text += f"📈 Jami: {len(all_results)} ta bitim\n"
+    text += f"✅ TP: {tp_count}\n"
+    text += f"❌ SL: {sl_count}\n"
+    text += f"🎯 Winrate: {winrate}%"
+    return text
 
 async def extract_trades_from_image(image_bytes: bytes) -> list:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -103,16 +123,23 @@ Agar rasmda hech qanday bitim topilmasa, bo'sh massiv qaytarib ber: []"""
     trades = json.loads(text)
     return trades
 
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 Trading Journal Bot\n\n"
-        "MetaTrader history screenshotini yuboring — "
-        "bot bitimlarni avtomatik Google Sheets ga yozadi.\n\n"
+        "MetaTrader history screenshotini yuboring.\n"
+        "Izoh bilan yuborish: rasm + caption ga:\n"
+        "  setup | xato | saboq\n\n"
         "Buyruqlar:\n"
         "/start — yordam\n"
-        "/report — so'nggi 5 ta bitim va statistika"
+        "/report — so'nggi 5 ta bitim\n"
+        "/hafta — haftalik statistika\n"
+        "/oy — oylik statistika\n"
+        "/oxirgi — eng oxirgi bitim\n"
+        "/instrument XAUUSD — instrument bo'yicha stat"
     )
 
+# /report — so'nggi 5 ta bitim
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sheet = get_sheet()
@@ -130,23 +157,150 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date = row[0] if row[0] else "—"
                 instrument = row[1] if row[1] else "—"
                 result = row[2] if row[2] else "—"
-                emoji = "✅" if result == "TP" else "❌" if result == "SL" else "—"
+                emoji = "✅" if result == "TP" else "❌"
                 text += f"{emoji} {date} | {instrument} | {result}\n"
 
-        all_results = [r[2] for r in trades if len(r) >= 3 and r[2] in ["TP", "SL"]]
-        if all_results:
-            tp_count = all_results.count("TP")
-            sl_count = all_results.count("SL")
-            winrate = round(tp_count / len(all_results) * 100)
-            text += f"\n📈 Jami: {len(all_results)} ta bitim\n"
-            text += f"✅ TP: {tp_count} | ❌ SL: {sl_count}\n"
-            text += f"🎯 Winrate: {winrate}%"
-
+        text += "\n"
+        text += build_stats_text(trades, "📊 Umumiy statistika")
         await update.message.reply_text(text)
     except Exception:
         logger.exception("Report xatosi")
-        await update.message.reply_text("Xatolik yuz berdi, qaytadan urinib ko'ring.")
+        await update.message.reply_text("Xatolik yuz berdi.")
 
+# /hafta
+async def hafta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+        trades = rows[1:]
+
+        now = datetime.now()
+        week_start = now.isocalendar()[1]
+
+        haftalik = []
+        for row in trades:
+            if len(row) >= 1 and row[0]:
+                try:
+                    trade_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    if (trade_date.isocalendar()[1] == week_start and
+                            trade_date.year == now.year):
+                        haftalik.append(row)
+                except ValueError:
+                    continue
+
+        await update.message.reply_text(
+            build_stats_text(haftalik, f"📅 Haftalik statistika ({now.strftime('%d.%m.%Y')})")
+        )
+    except Exception:
+        logger.exception("Hafta xatosi")
+        await update.message.reply_text("Xatolik yuz berdi.")
+
+# /oy
+async def oy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+        trades = rows[1:]
+
+        now = datetime.now()
+        oylik = []
+        for row in trades:
+            if len(row) >= 1 and row[0]:
+                try:
+                    trade_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    if (trade_date.month == now.month and
+                            trade_date.year == now.year):
+                        oylik.append(row)
+                except ValueError:
+                    continue
+
+        await update.message.reply_text(
+            build_stats_text(oylik, f"🗓 Oylik statistika ({now.strftime('%m.%Y')})")
+        )
+    except Exception:
+        logger.exception("Oy xatosi")
+        await update.message.reply_text("Xatolik yuz berdi.")
+
+# /oxirgi
+async def oxirgi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+        trades = rows[1:]
+
+        if not trades:
+            await update.message.reply_text("Hali hech qanday bitim yo'q.")
+            return
+
+        row = trades[-1]
+        date = row[0] if len(row) > 0 else "—"
+        instrument = row[1] if len(row) > 1 else "—"
+        result = row[2] if len(row) > 2 else "—"
+        setup = row[3] if len(row) > 3 and row[3] else "—"
+        mistake = row[4] if len(row) > 4 and row[4] else "—"
+        lesson = row[5] if len(row) > 5 and row[5] else "—"
+        emoji = "✅" if result == "TP" else "❌"
+
+        text = (
+            f"🔍 Eng oxirgi bitim:\n\n"
+            f"{emoji} {date} | {instrument} | {result}\n"
+            f"📌 Setup: {setup}\n"
+            f"⚠️ Xato: {mistake}\n"
+            f"📖 Saboq: {lesson}"
+        )
+        await update.message.reply_text(text)
+    except Exception:
+        logger.exception("Oxirgi xatosi")
+        await update.message.reply_text("Xatolik yuz berdi.")
+
+# /instrument XAUUSD
+async def instrument(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("Misol: /instrument XAUUSD")
+            return
+
+        inst = context.args[0].upper()
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+        trades = rows[1:]
+
+        filtered = [r for r in trades if len(r) >= 2 and r[1].upper() == inst]
+        await update.message.reply_text(
+            build_stats_text(filtered, f"📊 {inst} statistikasi")
+        )
+    except Exception:
+        logger.exception("Instrument xatosi")
+        await update.message.reply_text("Xatolik yuz berdi.")
+
+# Kunlik hisobot
+async def kunlik_hisobot(context):
+    if not CHAT_ID:
+        return
+    try:
+        sheet = get_sheet()
+        rows = sheet.get_all_values()
+        trades = rows[1:]
+
+        now = datetime.now()
+        bugungi = []
+        for row in trades:
+            if len(row) >= 1 and row[0]:
+                try:
+                    trade_date = datetime.strptime(row[0], "%d.%m.%Y")
+                    if (trade_date.day == now.day and
+                            trade_date.month == now.month and
+                            trade_date.year == now.year):
+                        bugungi.append(row)
+                except ValueError:
+                    continue
+
+        text = build_stats_text(bugungi, f"🌙 Kunlik hisobot ({now.strftime('%d.%m.%Y')})")
+        await context.bot.send_message(chat_id=CHAT_ID, text=text)
+    except Exception:
+        logger.exception("Kunlik hisobot xatosi")
+
+# Rasm qabul qilish
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📸 Rasm qabul qilindi, tahlil qilinmoqda...")
 
@@ -154,6 +308,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
+
+        # Caption dan setup | xato | saboq olish
+        caption = update.message.caption or ""
+        setup, mistake, lesson = "", "", ""
+        if caption:
+            parts = [p.strip() for p in caption.split("|")]
+            if len(parts) >= 1:
+                setup = parts[0]
+            if len(parts) >= 2:
+                mistake = parts[1]
+            if len(parts) >= 3:
+                lesson = parts[2]
 
         trades = await extract_trades_from_image(bytes(image_bytes))
 
@@ -180,9 +346,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 trade['date'],
                 trade['instrument'],
                 trade['result'],
-                trade['setup'],
-                trade['mistake'],
-                trade['lesson']
+                setup,
+                mistake,
+                lesson
             ])
             existing.add(key)
             added += 1
@@ -203,15 +369,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception:
         logger.exception("Rasm tahlil xatosi")
-        await update.message.reply_text(
-            "❌ Xatolik yuz berdi. Qaytadan urinib ko'ring."
-        )
+        await update.message.reply_text("❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("hafta", hafta))
+    app.add_handler(CommandHandler("oy", oy))
+    app.add_handler(CommandHandler("oxirgi", oxirgi))
+    app.add_handler(CommandHandler("instrument", instrument))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # Kunlik hisobot — har kuni kechqurun soat 21:00 da
+    app.job_queue.run_daily(
+        kunlik_hisobot,
+        time=time(hour=21, minute=0)
+    )
+
     logger.info("Trading Journal Bot ishga tushdi")
     app.run_polling()
 
