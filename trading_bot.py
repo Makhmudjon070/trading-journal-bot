@@ -54,7 +54,7 @@ def get_existing_trades(sheet):
 
 # Rasmdan bitimlarni ajratib olish (Gemini Vision orqali)
 async def extract_trades_from_image(image_bytes: bytes) -> list:
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
     today = datetime.now().strftime("%d.%m.%Y")
 
     image_part = {
