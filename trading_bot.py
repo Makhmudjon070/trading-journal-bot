@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import base64
+import time as time_module
 from datetime import datetime, time as dtime
 import anthropic
 import gspread
@@ -43,17 +44,14 @@ def get_sheet():
 
 def rebuild_sheet(sheet):
     """
-    Sheets dagi barcha bitimlarni o'qib, qayta tartiblab yozadi:
-    - Har kun bitimlarini guruhlab
-    - Har kun tagiga J/K ga kun totali
-    - Eng pastga umumiy balance
-    - TP qatori yashil, SL qatori qizil fon, kun total qatori ko'k
+    Barcha bitimlarni o'qib, batch update bilan qayta yozadi.
+    Har kun tagiga J/K ga kun totali, eng pastga balance.
     """
     all_rows = sheet.get_all_values()
     if len(all_rows) <= 1:
         return
 
-    # Faqat bitim qatorlarini olish (sarlavha va total qatorlarini o'tkazib yuborish)
+    # Faqat bitim qatorlarini olish
     trades = []
     for row in all_rows[1:]:
         if len(row) >= 3 and row[2] in ["TP", "SL"]:
@@ -71,21 +69,22 @@ def rebuild_sheet(sheet):
             days[date_part] = []
         days[date_part].append(trade)
 
-    # Sheets ni tozalash (sarlavhadan tashqari)
-    last_col = 11  # K ustuni
-    total_rows = sheet.row_count
-    if total_rows > 1:
-        sheet.batch_clear([f"A2:K{total_rows}"])
+    # Sheets ni tozalash
+    total_rows = max(sheet.row_count, 100)
+    time_module.sleep(1)
+    sheet.batch_clear([f"A2:K{total_rows}"])
+    time_module.sleep(2)
 
     # Ranglar
-    GREEN_BG = {"red": 0.714, "green": 0.843, "blue": 0.659}   # TP - yashil
-    RED_BG = {"red": 0.918, "green": 0.6, "blue": 0.6}         # SL - qizil
-    BLUE_BG = {"red": 0.643, "green": 0.761, "blue": 0.957}    # Kun total - ko'k
-    GOLD_BG = {"red": 1.0, "green": 0.851, "blue": 0.4}        # Balance - oltin
+    GREEN_BG = {"red": 0.714, "green": 0.843, "blue": 0.659}
+    RED_BG = {"red": 0.918, "green": 0.6, "blue": 0.6}
+    BLUE_BG = {"red": 0.643, "green": 0.761, "blue": 0.957}
+    GOLD_BG = {"red": 1.0, "green": 0.851, "blue": 0.4}
 
     current_row = 2
     total_pnl = 0.0
-    format_requests = []
+    all_values = []      # Barcha qator ma'lumotlari
+    format_requests = [] # Barcha rang so'rovlari
 
     for date_str, day_trades in days.items():
         day_tp = 0
@@ -97,7 +96,6 @@ def rebuild_sheet(sheet):
             lot = trade[6] if len(trade) > 6 else ""
             pnl_val = trade[7] if len(trade) > 7 else ""
 
-            # PnL hisoblash
             try:
                 pnl_float = float(pnl_val) if pnl_val else 0.0
             except ValueError:
@@ -111,21 +109,24 @@ def rebuild_sheet(sheet):
             elif result == "SL":
                 day_sl += 1
 
-            # Qatorni yozish (A-H)
+            # Qator ma'lumotlari (A-J)
             row_data = [
-                trade[0] if len(trade) > 0 else "",  # Date
-                trade[1] if len(trade) > 1 else "",  # Instrument
-                trade[2] if len(trade) > 2 else "",  # Result
-                trade[3] if len(trade) > 3 else "",  # Setup
-                trade[4] if len(trade) > 4 else "",  # Mistake
-                trade[5] if len(trade) > 5 else "",  # Lesson
-                lot,                                   # Lot
-                pnl_val,                               # PnL
-                "", ""                                 # I, J bo'sh
+                trade[0] if len(trade) > 0 else "",
+                trade[1] if len(trade) > 1 else "",
+                trade[2] if len(trade) > 2 else "",
+                trade[3] if len(trade) > 3 else "",
+                trade[4] if len(trade) > 4 else "",
+                trade[5] if len(trade) > 5 else "",
+                lot,
+                pnl_val,
+                "", ""
             ]
-            sheet.update(f"A{current_row}:J{current_row}", [row_data])
+            all_values.append({
+                "range": f"A{current_row}:J{current_row}",
+                "values": [row_data]
+            })
 
-            # Rang: TP yashil, SL qizil
+            # Rang
             bg_color = GREEN_BG if result == "TP" else RED_BG
             format_requests.append({
                 "repeatCell": {
@@ -136,24 +137,21 @@ def rebuild_sheet(sheet):
                         "startColumnIndex": 0,
                         "endColumnIndex": 8
                     },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "backgroundColor": bg_color
-                        }
-                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": bg_color}},
                     "fields": "userEnteredFormat.backgroundColor"
                 }
             })
             current_row += 1
 
-        # Kun total qatori — J va K ustunlarda
+        # Kun total qatori — J va K
         pnl_sign = "+" if day_pnl >= 0 else ""
         kun_label = f"📅 {date_str}"
         kun_stat = f"TP:{day_tp}  SL:{day_sl}  |  {pnl_sign}{day_pnl:.2f}$"
+        all_values.append({
+            "range": f"J{current_row}:K{current_row}",
+            "values": [[kun_label, kun_stat]]
+        })
 
-        sheet.update(f"J{current_row}:K{current_row}", [[kun_label, kun_stat]])
-
-        # Kun total rang — ko'k
         format_requests.append({
             "repeatCell": {
                 "range": {
@@ -176,9 +174,10 @@ def rebuild_sheet(sheet):
 
     # Eng pastga BALANCE
     pnl_sign = "+" if total_pnl >= 0 else ""
-    sheet.update(f"J{current_row}:K{current_row}",
-                 [["💰 JAMI BALANCE:", f"{pnl_sign}{total_pnl:.2f}$"]])
-
+    all_values.append({
+        "range": f"J{current_row}:K{current_row}",
+        "values": [["💰 JAMI BALANCE:", f"{pnl_sign}{total_pnl:.2f}$"]]
+    })
     format_requests.append({
         "repeatCell": {
             "range": {
@@ -198,9 +197,16 @@ def rebuild_sheet(sheet):
         }
     })
 
-    # Barcha ranglarni bir vaqtda yuborish
-    if format_requests:
-        sheet.spreadsheet.batch_update({"requests": format_requests})
+    # Barcha qiymatlarni BIR VAQTDA yuborish
+    time_module.sleep(1)
+    sheet.spreadsheet.values_batch_update({
+        "valueInputOption": "USER_ENTERED",
+        "data": all_values
+    })
+
+    # Barcha ranglarni BIR VAQTDA yuborish
+    time_module.sleep(1)
+    sheet.spreadsheet.batch_update({"requests": format_requests})
 
 
 def get_existing_trade_keys(sheet):
