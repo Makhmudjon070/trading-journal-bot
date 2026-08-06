@@ -69,10 +69,29 @@ def rebuild_sheet(sheet):
             days[date_part] = []
         days[date_part].append(trade)
 
-    # Sheets ni tozalash
-    total_rows = max(sheet.row_count, 100)
+    # Sheets ni to'liq tozalash (sarlavhadan tashqari)
     time_module.sleep(1)
-    sheet.batch_clear([f"A2:K{total_rows}"])
+    # Avval ranglarni tozalash
+    sheet.spreadsheet.batch_update({"requests": [{
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet.id,
+                "startRowIndex": 1,
+                "endRowIndex": 1000,
+                "startColumnIndex": 0,
+                "endColumnIndex": 11
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": {"red": 1, "green": 1, "blue": 1}
+                }
+            },
+            "fields": "userEnteredFormat.backgroundColor"
+        }
+    }]})
+    time_module.sleep(1)
+    # Keyin matnlarni tozalash
+    sheet.batch_clear([f"A2:K1000"])
     time_module.sleep(2)
 
     # Ranglar
