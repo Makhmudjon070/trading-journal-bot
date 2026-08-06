@@ -76,7 +76,7 @@ def build_stats_text(trades, title="📊 Statistika"):
     text += f"{pnl_emoji} Jami PnL: {total_pnl:+.2f}$"
     return text
 
-async def extract_trades_from_image(image_bytes: bytes) -> list:
+async def extract_trades_from_image(image_bytes: bytes, media_type: str = "image/jpeg") -> list:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     image_base64 = base64.standard_b64encode(image_bytes).decode("utf-8")
     today = datetime.now().strftime("%d.%m.%Y")
@@ -92,7 +92,7 @@ async def extract_trades_from_image(image_bytes: bytes) -> list:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/jpeg",
+                            "media_type": media_type,
                             "data": image_base64
                         }
                     },
@@ -322,8 +322,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message.photo:
             photo = update.message.photo[-1]
             file = await context.bot.get_file(photo.file_id)
+            media_type = "image/jpeg"
         elif update.message.document:
-            file = await context.bot.get_file(update.message.document.file_id)
+            doc = update.message.document
+            file = await context.bot.get_file(doc.file_id)
+            # Fayl turini aniqlash
+            mime = doc.mime_type or "image/jpeg"
+            if "png" in mime:
+                media_type = "image/png"
+            elif "webp" in mime:
+                media_type = "image/webp"
+            else:
+                media_type = "image/jpeg"
         else:
             await update.message.reply_text("❌ Rasm topilmadi.")
             return
@@ -339,7 +349,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(parts) >= 4: cap_lot = parts[3]
             if len(parts) >= 5: cap_pnl = parts[4]
 
-        trades = await extract_trades_from_image(bytes(image_bytes))
+        trades = await extract_trades_from_image(bytes(image_bytes), media_type)
 
         if not trades:
             await update.message.reply_text(
